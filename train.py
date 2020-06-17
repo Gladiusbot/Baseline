@@ -140,6 +140,7 @@ def train(model, dataloader, optimizer, epoch, opt, device):
         "y",
         "w",
         "h",
+        "giou_loss",
         "conf",
         "cls",
         "cls_acc",

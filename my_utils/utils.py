@@ -219,10 +219,53 @@ def bbox_iou(box1, box2, x1y1x2y2=True):
     # Union Area
     b1_area = (b1_x2 - b1_x1 + 1) * (b1_y2 - b1_y1 + 1)
     b2_area = (b2_x2 - b2_x1 + 1) * (b2_y2 - b2_y1 + 1)
-
-    iou = inter_area / (b1_area + b2_area - inter_area + 1e-16)
-
+    union_area = b1_area + b2_area - inter_area
+    # Calculate IoU
+    iou = inter_area / (union_area + 1e-16)
     return iou
+
+
+def bbox_giou(box1, box2, x1y1x2y2=True):
+    """
+    Returns the GIoU of two bounding boxes
+    """
+    if not x1y1x2y2:
+        # Transform from center and width to exact coordinates
+        b1_x1, b1_x2 = box1[:, 0] - box1[:, 2] / 2, box1[:, 0] + box1[:, 2] / 2
+        b1_y1, b1_y2 = box1[:, 1] - box1[:, 3] / 2, box1[:, 1] + box1[:, 3] / 2
+        b2_x1, b2_x2 = box2[:, 0] - box2[:, 2] / 2, box2[:, 0] + box2[:, 2] / 2
+        b2_y1, b2_y2 = box2[:, 1] - box2[:, 3] / 2, box2[:, 1] + box2[:, 3] / 2
+    else:
+        # Get the coordinates of bounding boxes
+        b1_x1, b1_y1, b1_x2, b1_y2 = box1[:, 0], box1[:, 1], box1[:, 2], box1[:, 3]
+        b2_x1, b2_y1, b2_x2, b2_y2 = box2[:, 0], box2[:, 1], box2[:, 2], box2[:, 3]
+
+    # get the corrdinates of the intersection rectangle
+    inter_rect_x1 = torch.max(b1_x1, b2_x1)
+    inter_rect_y1 = torch.max(b1_y1, b2_y1)
+    inter_rect_x2 = torch.min(b1_x2, b2_x2)
+    inter_rect_y2 = torch.min(b1_y2, b2_y2)
+    # Intersection area
+    inter_area = torch.clamp(inter_rect_x2 - inter_rect_x1 + 1, min=0) * torch.clamp(
+        inter_rect_y2 - inter_rect_y1 + 1, min=0
+    )
+    # Union Area
+    b1_area = (b1_x2 - b1_x1 + 1) * (b1_y2 - b1_y1 + 1)
+    b2_area = (b2_x2 - b2_x1 + 1) * (b2_y2 - b2_y1 + 1)
+    union_area = b1_area + b2_area - inter_area
+
+    # Calculate IoU
+    iou = inter_area / (union_area + 1e-16)
+
+    # Calculate GIoU
+    enclose_left = torch.min(b1_x1, b2_x1)
+    enclose_up = torch.min(b1_y1, b2_y1)
+    enclose_right = torch.max(b1_x2, b2_x2)
+    enclose_down = torch.max(b1_y2, b2_y2)
+    enclose_area = torch.max((enclose_right - enclose_left) * (enclose_down - enclose_up))
+    giou = iou - 1.0 * (enclose_area - union_area) / enclose_area
+
+    return giou
 
 
 def non_max_suppression(prediction, conf_thres=0.5, nms_thres=0.4):
@@ -270,10 +313,17 @@ def build_targets(pred_boxes, pred_cls, target, anchors, ignore_thres):
 
     ByteTensor = torch.cuda.ByteTensor if pred_boxes.is_cuda else torch.ByteTensor
     FloatTensor = torch.cuda.FloatTensor if pred_boxes.is_cuda else torch.FloatTensor
-
+    # print("\n>>>>BUILD_TARGETS>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>")
+    # print("pred_boxes", pred_boxes.shape, pred_boxes)
+    # print("pred_cls", pred_cls.shape, pred_cls)
+    # print("target", target.shape, target)
+    # batch size (32 * 3 * 13 * 13 * 4)
     nB = pred_boxes.size(0)
+    # numbers of predictions(per grid)
     nA = pred_boxes.size(1)
+    # numbers of classes
     nC = pred_cls.size(-1)
+    # numbers of grid
     nG = pred_boxes.size(2)
 
     # Output tensors
@@ -281,6 +331,7 @@ def build_targets(pred_boxes, pred_cls, target, anchors, ignore_thres):
     noobj_mask = ByteTensor(nB, nA, nG, nG).fill_(1)
     class_mask = FloatTensor(nB, nA, nG, nG).fill_(0)
     iou_scores = FloatTensor(nB, nA, nG, nG).fill_(0)
+    giou_scores = FloatTensor(nB, nA, nG, nG).fill_(0)
     tx = FloatTensor(nB, nA, nG, nG).fill_(0)
     ty = FloatTensor(nB, nA, nG, nG).fill_(0)
     tw = FloatTensor(nB, nA, nG, nG).fill_(0)
@@ -318,6 +369,9 @@ def build_targets(pred_boxes, pred_cls, target, anchors, ignore_thres):
     # Compute label correctness and iou at best anchor
     class_mask[b, best_n, gj, gi] = (pred_cls[b, best_n, gj, gi].argmax(-1) == target_labels).float()
     iou_scores[b, best_n, gj, gi] = bbox_iou(pred_boxes[b, best_n, gj, gi], target_boxes, x1y1x2y2=False)
+    giou_scores[b, best_n, gj, gi] = bbox_giou(pred_boxes[b, best_n, gj, gi], target_boxes, x1y1x2y2=False)
 
     tconf = obj_mask.float()
-    return iou_scores, class_mask, obj_mask, noobj_mask, tx, ty, tw, th, tcls, tconf
+    # print("iou_scores", iou_scores.shape, iou_scores)
+    # print(">>>>BUILD_TARGETS>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>\n")
+    return giou_scores, iou_scores, class_mask, obj_mask, noobj_mask, tx, ty, tw, th, tcls, tconf
